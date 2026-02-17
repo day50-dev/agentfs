@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AgentFS FUSE Implementation for Linux."""
+"""AgentFS FUSE Implementation using pyfuse3."""
 
 import os
 import sys
@@ -7,13 +7,16 @@ import errno
 import hashlib
 import json
 import time
+import stat
 from pathlib import Path
-from fuse import FUSE, Operations, LoggingMixIn
 from collections import OrderedDict
+from pyfuse3 import Operations, EntryAttributes, FileInfo, ROOT_INODE, FUSEError, StatvfsData
+from pyfuse3 import init as pyfuse3_init, main as pyfuse3_main, close as pyfuse3_close
+import trio
 
 
-class AgentFS(LoggingMixIn, Operations):
-    """AgentFS - A FUSE-based overlay filesystem for AI agents."""
+class AgentFS(Operations):
+    """AgentFS - A FUSE-based overlay filesystem for AI agents using pyfuse3."""
 
     def __init__(self, repo_path):
         """Initialize AgentFS with repository path."""
@@ -23,14 +26,28 @@ class AgentFS(LoggingMixIn, Operations):
         self.work_path = self.repo_path / "work"
         
         self.agents = self._load_agents()
-        
         self._ensure_directories()
         
         self._agent_id = os.environ.get('AGENT_ID', 'default')
         
+        # Inode management - start at ROOT_INODE (1) for '/'
+        self._inode_counter = ROOT_INODE
+        self._path_to_inode = {}
+        self._inode_to_path = {}
+        
+        # File handle management - store (file_obj, path) tuples
+        self._fh_counter = 0
+        self._open_files = {}
+        
+        # File contents for conflict detection
         self.file_contents = {}
         
+        # Conflicts list
         self.conflicts = []
+        
+        # Initialize root inode
+        self._path_to_inode["/"] = ROOT_INODE
+        self._inode_to_path[ROOT_INODE] = "/"
 
     def _ensure_directories(self):
         """Create required directory structure."""
@@ -56,16 +73,43 @@ class AgentFS(LoggingMixIn, Operations):
         with open(agents_file, 'w') as f:
             json.dump({'agents': self.agents}, f, indent=2)
 
-    def _get_agent_path(self, agent_name, path):
-        """Get the path for an agent's diff layer."""
-        return self.agents_dir / agent_name / path.lstrip('/')
+    def _add_path_to_inode_map(self, path, file_path):
+        """Add a path-to-inode mapping."""
+        if path not in self._path_to_inode:
+            self._inode_counter += 1
+            inode = self._inode_counter
+            self._path_to_inode[path] = inode
+            self._inode_to_path[inode] = path
+            return inode
+        return self._path_to_inode[path]
+
+    def _get_inode_for_path(self, path):
+        """Get inode for a path, creating mapping if needed."""
+        path = path.rstrip('/') or '/'
+        if path in self._path_to_inode:
+            return self._path_to_inode[path]
+        
+        resolved_path, _ = self._get_resolved_path(path)
+        if resolved_path and resolved_path.exists():
+            return self._add_path_to_inode_map(path, resolved_path)
+        
+        # Check if file exists in agent layer (even if not resolved)
+        agent_path = self.agents_dir / self._agent_id / path.lstrip('/')
+        if agent_path.exists():
+            return self._add_path_to_inode_map(path, agent_path)
+        
+        return None
+
+    def _get_path_for_inode(self, inode):
+        """Get path for an inode."""
+        return self._inode_to_path.get(inode)
 
     def _get_resolved_path(self, path):
         """Resolve a path to the topmost layer that contains it."""
         path = '/' + path.lstrip('/')
         
         for agent_name in reversed(self.agents):
-            agent_path = self._get_agent_path(agent_name, path)
+            agent_path = self.agents_dir / agent_name / path.lstrip('/')
             if agent_path.exists():
                 return agent_path, agent_name
         
@@ -111,7 +155,7 @@ class AgentFS(LoggingMixIn, Operations):
         entries = OrderedDict()
         
         for agent_name in reversed(self.agents):
-            agent_path = self._get_agent_path(agent_name, path)
+            agent_path = self.agents_dir / agent_name / path.lstrip('/')
             if agent_path.exists() and agent_path.is_dir():
                 try:
                     for entry in os.listdir(agent_path):
@@ -129,99 +173,182 @@ class AgentFS(LoggingMixIn, Operations):
         
         return list(entries.keys())
 
-    def _get_size(self, path):
-        """Get file size from resolved path."""
-        resolved_path, _ = self._get_resolved_path(path)
-        if resolved_path and resolved_path.exists():
-            return resolved_path.stat().st_size
-        return 0
+    def _get_file_stat(self, file_path):
+        """Get stat info for a file path."""
+        if not file_path or not file_path.exists():
+            return None
+        file_stat = file_path.stat()
+        
+        attr = EntryAttributes()
+        attr.st_mode = file_stat.st_mode
+        attr.st_nlink = file_stat.st_nlink
+        attr.st_uid = file_stat.st_uid
+        attr.st_gid = file_stat.st_gid
+        attr.st_size = file_stat.st_size
+        attr.st_atime_ns = int(file_stat.st_atime * 1e9)
+        attr.st_mtime_ns = int(file_stat.st_mtime * 1e9)
+        attr.st_ctime_ns = int(file_stat.st_ctime * 1e9)
+        attr.st_blksize = 512
+        attr.st_blocks = (file_stat.st_size + 511) // 512
+        
+        return attr
 
-    def _get_stat(self, path):
-        """Get stat info from resolved path."""
-        resolved_path, _ = self._get_resolved_path(path)
-        if resolved_path and resolved_path.exists():
-            return resolved_path.stat()
-        return None
+    async def init(self):
+        """Initialize filesystem."""
+        pass
 
-    def getattr(self, path, fh=None):
+    async def destroy(self):
+        """Cleanup on filesystem destruction."""
+        for fh, (file_obj, path) in self._open_files.items():
+            try:
+                file_obj.close()
+            except:
+                pass
+        self._open_files.clear()
+
+    async def getattr(self, inode, ctx=None):
         """Get file attributes."""
-        path = '/' + path.lstrip('/')
+        path = self._get_path_for_inode(inode)
+        if path is None:
+            raise FUSEError(errno.ENOENT)
         
-        stat = self._get_stat(path)
-        if stat is None:
-            raise FileNotFoundError(errno.ENOENT, path)
-        
-        return {
-            'st_atime': stat.st_atime,
-            'st_ctime': stat.st_ctime,
-            'st_gid': stat.st_gid,
-            'st_mode': stat.st_mode,
-            'st_mtime': stat.st_mtime,
-            'st_nlink': stat.st_nlink,
-            'st_size': stat.st_size,
-            'st_uid': stat.st_uid,
-        }
-
-    def readlink(self, path):
-        """Read symlink."""
-        path = '/' + path.lstrip('/')
         resolved_path, _ = self._get_resolved_path(path)
-        if resolved_path and resolved_path.is_symlink():
-            return os.readlink(resolved_path)
-        raise ValueError("Not a symlink")
-
-    def readdir(self, path, fh):
-        """List directory contents."""
-        path = '/' + path.lstrip('/')
-        entries = self._get_all_entries(path)
-        for entry in entries:
-            yield entry
-
-    def lookup(self, path, fh=None):
-        """Look up a file by name."""
-        path = '/' + path.lstrip('/')
-        resolved_path, _ = self._get_resolved_path(path)
-        if resolved_path is None:
-            raise FileNotFoundError(errno.ENOENT, path)
-        return {'st_ino': 1, 'st_mode': 33188, 'st_nlink': 1}
-
-    def open(self, path, flags):
-        """Open a file."""
-        path = '/' + path.lstrip('/')
-        self._last_opened_path = path
-        return 0
-
-    def read(self, path, size, offset, fh):
-        """Read from file."""
-        path = '/' + path.lstrip('/')
-        resolved_path, agent = self._get_resolved_path(path)
-        
         if resolved_path is None or not resolved_path.exists():
-            raise FileNotFoundError(errno.ENOENT, path)
+            raise FUSEError(errno.ENOENT)
         
-        with open(resolved_path, 'rb') as f:
-            f.seek(offset)
-            data = f.read(size)
-            return data
+        attr = self._get_file_stat(resolved_path)
+        if attr is None:
+            raise FUSEError(errno.ENOENT)
+        
+        return attr
 
-    def write(self, path, data, offset, fh):
+    async def lookup(self, parent_inode, name, ctx=None):
+        """Look up a file by name."""
+        parent_path = self._get_path_for_inode(parent_inode)
+        if parent_path is None:
+            raise FUSEError(errno.ENOENT)
+        
+        child_name = name.decode('utf-8')
+        if child_name == '.':
+            inode = parent_inode
+            child_path = parent_path
+        elif child_name == '..':
+            if parent_path == '/':
+                inode = parent_inode
+                child_path = parent_path
+            else:
+                parent_parts = parent_path.rstrip('/').split('/')
+                if len(parent_parts) > 1:
+                    child_path = '/'.join(parent_parts[:-1]) or '/'
+                else:
+                    child_path = '/'
+                inode = self._get_inode_for_path(child_path)
+                if inode is None:
+                    inode = self._add_path_to_inode_map(child_path, self.base_path)
+        else:
+            child_path = (parent_path.rstrip('/') + '/' + child_name) if parent_path != '/' else '/' + child_name
+            inode = self._get_inode_for_path(child_path)
+            if inode is None:
+                raise FUSEError(errno.ENOENT)
+        
+        attr = await self.getattr(inode, ctx)
+        return {'entry_attributes': attr, 'inode': inode}
+
+    async def opendir(self, inode, ctx=None):
+        """Open a directory."""
+        path = self._get_path_for_inode(inode)
+        if path is None:
+            raise FUSEError(errno.ENOENT)
+        
+        return inode
+
+    async def readdir(self, fh, start_id, token):
+        """Read directory entries."""
+        path = self._get_path_for_inode(fh)
+        if path is None:
+            raise FUSEError(errno.ENOENT)
+        
+        entries = self._get_all_entries(path)
+        
+        for i, entry in enumerate(entries, start=1):
+            if i < start_id:
+                continue
+            
+            attr = EntryAttributes()
+            entry_path = (path.rstrip('/') + '/' + entry) if path != '/' else '/' + entry
+            resolved_path, _ = self._get_resolved_path(entry_path)
+            
+            if resolved_path and resolved_path.is_dir():
+                attr.st_mode = stat.S_IFDIR | 0o755
+                attr.st_nlink = 2
+                attr.st_size = 4096
+            else:
+                attr.st_mode = stat.S_IFREG | 0o644
+                attr.st_nlink = 1
+                if resolved_path and resolved_path.exists():
+                    attr.st_size = resolved_path.stat().st_size
+                else:
+                    attr.st_size = 0
+            
+            attr.st_ino = i
+            attr.st_uid = os.getuid()
+            attr.st_gid = os.getgid()
+            attr.st_atime_ns = int(time.time() * 1e9)
+            attr.st_mtime_ns = int(time.time() * 1e9)
+            attr.st_ctime_ns = int(time.time() * 1e9)
+            
+            yield (i, entry.encode('utf-8'), attr)
+
+    async def open(self, inode, flags, ctx=None):
+        """Open a file."""
+        path = self._get_path_for_inode(inode)
+        if path is None:
+            raise FUSEError(errno.ENOENT)
+        
+        resolved_path, _ = self._get_resolved_path(path)
+        if resolved_path is None or not resolved_path.exists():
+            raise FUSEError(errno.ENOENT)
+        
+        self._fh_counter += 1
+        fh = self._fh_counter
+        
+        if flags & os.O_WRONLY or flags & os.O_RDWR:
+            file_obj = open(resolved_path, 'r+b')
+        else:
+            file_obj = open(resolved_path, 'rb')
+        
+        self._open_files[fh] = (file_obj, path)
+        
+        fi = FileInfo()
+        fi.fh = fh
+        return fi
+
+    async def read(self, fh, off, size):
+        """Read from file."""
+        if fh not in self._open_files:
+            raise FUSEError(errno.EBADF)
+        
+        file_obj, path = self._open_files[fh]
+        file_obj.seek(off)
+        data = file_obj.read(size)
+        return data
+
+    async def write(self, fh, off, buf):
         """Write to file with conflict detection."""
-        path = '/' + path.lstrip('/')
+        if fh not in self._open_files:
+            raise FUSEError(errno.ENOENT)
+        
+        file_obj, path = self._open_files[fh]
         
         if self._check_conflict(path):
             self._record_conflict(path, self._agent_id)
-            raise IOError(errno.EBUSY, "Conflict detected")
+            raise FUSEError(errno.EBUSY)
         
-        agent_path = self._get_agent_path(self._agent_id, path)
+        agent_path = self.agents_dir / self._agent_id / path.lstrip('/')
         agent_path.parent.mkdir(parents=True, exist_ok=True)
         
-        try:
-            with open(agent_path, 'r+b') as f:
-                f.seek(offset)
-                f.write(data)
-        except FileNotFoundError:
-            with open(agent_path, 'wb') as f:
-                f.write(data)
+        file_obj.seek(off)
+        file_obj.write(buf)
         
         path_key = path.lstrip('/')
         self.file_contents[path_key] = {
@@ -229,100 +356,265 @@ class AgentFS(LoggingMixIn, Operations):
             'agent': self._agent_id
         }
         
-        return len(data)
+        return len(buf)
 
-    def create(self, path, mode, fh=None):
-        """Create a new file in agent's diff layer."""
-        path = '/' + path.lstrip('/')
-        
-        agent_path = self._get_agent_path(self._agent_id, path)
-        agent_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        agent_path.touch(mode=mode)
-        
-        path_key = path.lstrip('/')
-        self.file_contents[path_key] = {
-            'hash': None,
-            'agent': self._agent_id
-        }
-        
-        return 0
+    async def release(self, fh):
+        """Release file handle."""
+        if fh in self._open_files:
+            try:
+                self._open_files[fh][0].close()
+            except:
+                pass
+            del self._open_files[fh]
+        return None
 
-    def unlink(self, path):
-        """Delete a file from agent's diff layer."""
-        path = '/' + path.lstrip('/')
+    async def releasedir(self, fh):
+        """Release directory handle."""
+        return None
+
+    async def unlink(self, parent_inode, name, ctx=None):
+        """Delete a file."""
+        parent_path = self._get_path_for_inode(parent_inode)
+        if parent_path is None:
+            raise FUSEError(errno.ENOENT)
         
-        resolved_path, _ = self._get_resolved_path(path)
+        file_name = name.decode('utf-8')
+        file_path = (parent_path.rstrip('/') + '/' + file_name) if parent_path != '/' else '/' + file_name
+        
+        resolved_path, _ = self._get_resolved_path(file_path)
         if resolved_path is None:
-            raise FileNotFoundError(errno.ENOENT, path)
+            raise FUSEError(errno.ENOENT)
         
-        agent_path = self._get_agent_path(self._agent_id, path)
+        agent_path = self.agents_dir / self._agent_id / file_path.lstrip('/')
         if agent_path.exists():
             agent_path.unlink()
-        elif resolved_path == agent_path:
+        else:
             resolved_path.unlink()
         
-        path_key = path.lstrip('/')
+        if file_path in self._path_to_inode:
+            inode = self._path_to_inode[file_path]
+            del self._path_to_inode[file_path]
+            del self._inode_to_path[inode]
+        
+        path_key = file_path.lstrip('/')
         if path_key in self.file_contents:
             del self.file_contents[path_key]
+        
+        return None
 
-    def rename(self, old, new):
-        """Rename a file with conflict checking."""
-        old = '/' + old.lstrip('/')
-        new = '/' + new.lstrip('/')
+    async def rename(self, parent_inode_old, name_old, parent_inode_new, name_new, flags, ctx=None):
+        """Rename a file."""
+        old_parent_path = self._get_path_for_inode(parent_inode_old)
+        new_parent_path = self._get_path_for_inode(parent_inode_new)
         
-        if self._check_conflict(old):
-            self._record_conflict(old, self._agent_id)
-            raise IOError(errno.EBUSY, "Conflict detected")
+        if old_parent_path is None or new_parent_path is None:
+            raise FUSEError(errno.ENOENT)
         
-        old_agent_path = self._get_agent_path(self._agent_id, old)
-        new_agent_path = self._get_agent_path(self._agent_id, new)
+        old_name = name_old.decode('utf-8')
+        new_name = name_new.decode('utf-8')
         
-        old_resolved, _ = self._get_resolved_path(old)
+        old_path = (old_parent_path.rstrip('/') + '/' + old_name) if old_parent_path != '/' else '/' + old_name
+        new_path = (new_parent_path.rstrip('/') + '/' + new_name) if new_parent_path != '/' else '/' + new_name
+        
+        if self._check_conflict(old_path):
+            self._record_conflict(old_path, self._agent_id)
+            raise FUSEError(errno.EBUSY)
+        
+        old_agent_path = self.agents_dir / self._agent_id / old_path.lstrip('/')
+        new_agent_path = self.agents_dir / self._agent_id / new_path.lstrip('/')
+        
+        old_resolved, _ = self._get_resolved_path(old_path)
         if old_resolved and old_resolved != old_agent_path:
-            raise IOError(errno.EXDEV, "Cannot rename files outside agent layer")
+            raise FUSEError(errno.EXDEV)
         
         if old_agent_path.exists():
             old_agent_path.rename(new_agent_path)
             
-            old_key = old.lstrip('/')
-            new_key = new.lstrip('/')
+            if old_path in self._path_to_inode:
+                inode = self._path_to_inode[old_path]
+                del self._path_to_inode[old_path]
+                self._inode_to_path[inode] = new_path
+                self._path_to_inode[new_path] = inode
+            
+            old_key = old_path.lstrip('/')
+            new_key = new_path.lstrip('/')
             if old_key in self.file_contents:
                 self.file_contents[new_key] = self.file_contents[old_key]
                 del self.file_contents[old_key]
+        
+        return None
 
-    def flush(self, path, fh):
-        """Flush file changes."""
-        return 0
+    async def mkdir(self, parent_inode, name, mode, ctx=None):
+        """Create a directory."""
+        parent_path = self._get_path_for_inode(parent_inode)
+        if parent_path is None:
+            raise FUSEError(errno.ENOENT)
+        
+        dir_name = name.decode('utf-8')
+        dir_path = (parent_path.rstrip('/') + '/' + dir_name) if parent_path != '/' else '/' + dir_name
+        
+        agent_dir = self.agents_dir / self._agent_id / dir_path.lstrip('/')
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        
+        inode = self._add_path_to_inode_map(dir_path, agent_dir)
+        
+        attr = EntryAttributes()
+        attr.st_mode = mode | stat.S_IFDIR
+        attr.st_nlink = 2
+        attr.st_size = 4096
+        
+        return {'entry_attributes': attr, 'inode': inode}
 
-    def release(self, path, fh):
-        """Release file handle."""
-        return 0
+    async def rmdir(self, parent_inode, name, ctx=None):
+        """Remove a directory."""
+        parent_path = self._get_path_for_inode(parent_inode)
+        if parent_path is None:
+            raise FUSEError(errno.ENOENT)
+        
+        dir_name = name.decode('utf-8')
+        dir_path = (parent_path.rstrip('/') + '/' + dir_name) if parent_path != '/' else '/' + dir_name
+        
+        agent_dir = self.agents_dir / self._agent_id / dir_path.lstrip('/')
+        if agent_dir.exists():
+            agent_dir.rmdir()
+        
+        if dir_path in self._path_to_inode:
+            inode = self._path_to_inode[dir_path]
+            del self._path_to_inode[dir_path]
+            del self._inode_to_path[inode]
+        
+        return None
 
-    def statfs(self, path):
+    async def symlink(self, parent_inode, name, target, ctx=None):
+        """Create a symbolic link."""
+        parent_path = self._get_path_for_inode(parent_inode)
+        if parent_path is None:
+            raise FUSEError(errno.ENOENT)
+        
+        link_name = name.decode('utf-8')
+        link_path = (parent_path.rstrip('/') + '/' + link_name) if parent_path != '/' else '/' + link_name
+        
+        agent_link = self.agents_dir / self._agent_id / link_path.lstrip('/')
+        agent_link.symlink_to(target.decode('utf-8'))
+        
+        inode = self._add_path_to_inode_map(link_path, agent_link)
+        
+        attr = EntryAttributes()
+        attr.st_mode = stat.S_IFLNK | 0o777
+        attr.st_nlink = 1
+        attr.st_size = len(target)
+        
+        return {'entry_attributes': attr, 'inode': inode}
+
+    async def readlink(self, inode, ctx=None):
+        """Read a symbolic link."""
+        path = self._get_path_for_inode(inode)
+        if path is None:
+            raise FUSEError(errno.ENOENT)
+        
+        resolved_path, _ = self._get_resolved_path(path)
+        if resolved_path is None or not resolved_path.is_symlink():
+            raise FUSEError(errno.EINVAL)
+        
+        target = os.readlink(resolved_path)
+        return target.encode('utf-8')
+
+    async def statfs(self, ctx=None):
         """Get filesystem statistics."""
         stat = os.statvfs(self.repo_path)
-        return {
-            'f_bsize': stat.f_bsize,
-            'f_blocks': stat.f_blocks,
-            'f_bfree': stat.f_bfree,
-            'f_bavail': stat.f_bavail,
-            'f_files': stat.f_files,
-            'f_ffree': stat.f_ffree,
-            'f_namemax': stat.f_namemax,
+        
+        fs_stats = StatvfsData()
+        fs_stats.f_bsize = stat.f_bsize
+        fs_stats.f_frsize = stat.f_frsize
+        fs_stats.f_blocks = stat.f_blocks
+        fs_stats.f_bfree = stat.f_bfree
+        fs_stats.f_bavail = stat.f_bavail
+        fs_stats.f_files = stat.f_files
+        fs_stats.f_ffree = stat.f_ffree
+        fs_stats.f_namemax = stat.f_namemax
+        
+        return fs_stats
+
+    async def flush(self, fh):
+        """Flush file changes."""
+        if fh in self._open_files:
+            self._open_files[fh][0].flush()
+        return None
+
+    async def fsync(self, fh, datasync):
+        """Synchronize file changes."""
+        if fh in self._open_files:
+            self._open_files[fh][0].sync()
+        return None
+
+    async def fsyncdir(self, fh, datasync):
+        """Synchronize directory changes."""
+        return None
+
+    async def create(self, parent_inode, name, mode, flags, ctx=None):
+        """Create a new file."""
+        parent_path = self._get_path_for_inode(parent_inode)
+        if parent_path is None:
+            raise FUSEError(errno.ENOENT)
+        
+        file_name = name.decode('utf-8')
+        file_path = (parent_path.rstrip('/') + '/' + file_name) if parent_path != '/' else '/' + file_name
+        
+        agent_file = self.agents_dir / self._agent_id / file_path.lstrip('/')
+        agent_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        file_obj = open(agent_file, 'w+b')
+        
+        self._fh_counter += 1
+        fh = self._fh_counter
+        self._open_files[fh] = (file_obj, file_path)
+        
+        inode = self._add_path_to_inode_map(file_path, agent_file)
+        
+        self.file_contents[file_path.lstrip('/')] = {
+            'hash': None,
+            'agent': self._agent_id
         }
+        
+        fi = FileInfo()
+        fi.fh = fh
+        fi.direct_io = True
+        
+        attr = EntryAttributes()
+        attr.st_mode = mode
+        attr.st_nlink = 1
+        attr.st_size = 0
+        
+        return {'entry_attributes': attr, 'inode': inode, 'file_info': fi}
+
+    async def setxattr(self, inode, name, value, ctx=None):
+        """Set extended attribute."""
+        raise FUSEError(errno.ENOTSUP)
+
+    async def getxattr(self, inode, name, ctx=None):
+        """Get extended attribute."""
+        raise FUSEError(errno.ENOATTR)
+
+    async def listxattr(self, inode, ctx=None):
+        """List extended attributes."""
+        return []
+
+    async def removexattr(self, inode, name, ctx=None):
+        """Remove extended attribute."""
+        raise FUSEError(errno.ENOTSUP)
 
 
 def mount(repo_path, mount_path, foreground=False, debug=False):
     """Mount the AgentFS filesystem."""
     fs = AgentFS(repo_path)
-    FUSE(
-        fs,
-        mount_path,
-        foreground=foreground,
-        debug=debug,
-        nothreads=True
-    )
+    pyfuse3_init(fs, mount_path, pyfuse3.default_options)
+    try:
+        if foreground:
+            pyfuse3_main(max_tasks=1)
+        else:
+            pyfuse3_main(max_tasks=1)
+    finally:
+        pyfuse3_close(unmount=True)
 
 
 def unmount(mount_path):

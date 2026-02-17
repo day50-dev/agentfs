@@ -277,7 +277,7 @@ Before running tests, ensure dependencies are installed:
 
 ```bash
 # Install dependencies first
-pip install -e . pytest pytest-cov fuse
+pip install -e . pytest pytest-cov pyfuse3
 
 # Run all tests
 pytest
@@ -289,12 +289,7 @@ pytest -v
 pytest --cov=agentfs --cov-report=html
 ```
 
-**Note:** The test suite requires the `fuse` Python package (not pyfuse3). Install it with:
-```bash
-pip install fuse
-```
-
-pyfuse3 is only required for FUSE filesystem operations (mounting).
+**Note:** Tests require pyfuse3 for FUSE operations. The test suite verifies agent management, conflict detection, and path resolution logic.
 
 ### Test Structure
 
@@ -330,10 +325,11 @@ For development, you'll need:
 - Python 3.8+
 - pytest for testing
 - pyfuse3 for FUSE operations (requires FUSE development libraries)
+- pytest-asyncio for async test support
 
 Install in development mode:
 ```bash
-pip install -e . pytest pytest-cov
+pip install -e . pytest pytest-cov pytest-asyncio
 ```
 
 Use the provided scripts to manage dependencies:

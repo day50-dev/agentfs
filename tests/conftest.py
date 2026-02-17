@@ -1,6 +1,7 @@
 """Pytest configuration for AgentFS tests."""
 
 import pytest
+import trio
 
 
 @pytest.fixture
@@ -19,3 +20,11 @@ def temp_repo(tmp_path):
     work_path.mkdir()
     
     return repo_path
+
+
+@pytest.fixture
+def event_loop():
+    """Create a trio event loop for async tests."""
+    loop = trio.new_event_loop()
+    yield loop
+    loop.close()

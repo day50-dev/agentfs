@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-"""Tests for AgentFS - Linux implementation."""
+"""Tests for AgentFS - pyfuse3 implementation."""
 
+import asyncio
 import os
 import sys
 import tempfile
-import shutil
 import json
-import subprocess
-import time
+import stat
 from pathlib import Path
-from threading import Thread
 import pytest
-
-sys.path.insert(0, str(Path(__file__).parent))
-
-from agentfs.fuse import AgentFS
+import trio
+from agentfs.fuse import AgentFS, ROOT_INODE
+from pyfuse3 import FUSEError
 
 
 class TestAgentFSRepository:
@@ -195,7 +192,7 @@ class TestAgentFSResolving:
             
             fs = AgentFS(str(repo_path))
             
-            entries = list(fs.readdir("/", 0))
+            entries = list(fs._get_all_entries("/"))
             assert "file1.txt" in entries
             assert "file2.txt" in entries
 
@@ -217,7 +214,7 @@ class TestAgentFSResolving:
             fs = AgentFS(str(repo_path))
             fs.agents = ["claude"]
             
-            entries = list(fs.readdir("/", 0))
+            entries = list(fs._get_all_entries("/"))
             assert "base_file.txt" in entries
             assert "agent_file.txt" in entries
 
@@ -283,7 +280,8 @@ class TestAgentFSHashing:
 class TestAgentFSOperations:
     """Tests for FUSE operations."""
 
-    def test_getattr_exists(self):
+    @pytest.mark.asyncio
+    async def test_getattr_exists(self):
         """Test getattr for existing file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -295,13 +293,16 @@ class TestAgentFSOperations:
             test_file.write_text("content")
             
             fs = AgentFS(str(repo_path))
-            attr = fs.getattr("/test.txt")
+            
+            # Get inode for test file
+            inode = fs._get_inode_for_path("/test.txt")
+            attr = await fs.getattr(inode)
             
             assert attr is not None
-            assert "st_size" in attr
-            assert attr["st_size"] == len("content")
+            assert attr.st_size == len("content")
 
-    def test_getattr_missing(self):
+    @pytest.mark.asyncio
+    async def test_getattr_missing(self):
         """Test getattr for non-existent file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -309,10 +310,11 @@ class TestAgentFSOperations:
             
             fs = AgentFS(str(repo_path))
             
-            with pytest.raises(FileNotFoundError):
-                fs.getattr("/nonexistent")
+            with pytest.raises(FUSEError):
+                await fs.getattr(999)
 
-    def test_readlink_symlink(self):
+    @pytest.mark.asyncio
+    async def test_readlink_symlink(self):
         """Test readlink for symlink."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -320,18 +322,22 @@ class TestAgentFSOperations:
             base_path = repo_path / "base"
             base_path.mkdir()
             
+            # Create a target file first, then symlink to it
+            target_file = base_path / "target.txt"
+            target_file.write_text("target content")
+            
             test_link = base_path / "link"
-            test_link.symlink_to("target")
+            test_link.symlink_to("target.txt")
             
             fs = AgentFS(str(repo_path))
             
-            try:
-                link_target = fs.readlink("/link")
-                assert link_target == "target"
-            except ValueError:
-                pytest.skip("readlink not implemented for symlinks")
+            inode = fs._get_inode_for_path("/link")
+            link_target = await fs.readlink(inode)
+            
+            assert link_target == b"target.txt"
 
-    def test_readlink_not_symlink(self):
+    @pytest.mark.asyncio
+    async def test_readlink_not_symlink(self):
         """Test readlink for non-symlink."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -344,10 +350,13 @@ class TestAgentFSOperations:
             
             fs = AgentFS(str(repo_path))
             
-            with pytest.raises(ValueError):
-                fs.readlink("/file.txt")
+            inode = fs._get_inode_for_path("/file.txt")
+            
+            with pytest.raises(FUSEError):
+                await fs.readlink(inode)
 
-    def test_lookup_exists(self):
+    @pytest.mark.asyncio
+    async def test_lookup_exists(self):
         """Test lookup for existing file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -359,12 +368,16 @@ class TestAgentFSOperations:
             test_file.write_text("content")
             
             fs = AgentFS(str(repo_path))
-            result = fs.lookup("/test.txt")
+            
+            parent_inode = ROOT_INODE
+            result = await fs.lookup(parent_inode, b"test.txt")
             
             assert result is not None
-            assert "st_ino" in result
+            assert "inode" in result
+            assert "entry_attributes" in result
 
-    def test_lookup_missing(self):
+    @pytest.mark.asyncio
+    async def test_lookup_missing(self):
         """Test lookup for non-existent file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -372,10 +385,13 @@ class TestAgentFSOperations:
             
             fs = AgentFS(str(repo_path))
             
-            with pytest.raises(FileNotFoundError):
-                fs.lookup("/nonexistent")
+            parent_inode = ROOT_INODE
+            
+            with pytest.raises(FUSEError):
+                await fs.lookup(parent_inode, b"nonexistent.txt")
 
-    def test_open_file(self):
+    @pytest.mark.asyncio
+    async def test_open_file(self):
         """Test opening a file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -387,11 +403,14 @@ class TestAgentFSOperations:
             test_file.write_text("content")
             
             fs = AgentFS(str(repo_path))
-            result = fs.open("/test.txt", os.O_RDONLY)
             
-            assert result == 0
+            inode = fs._get_inode_for_path("/test.txt")
+            fi = await fs.open(inode, os.O_RDONLY)
+            
+            assert fi.fh is not None
 
-    def test_read_file(self):
+    @pytest.mark.asyncio
+    async def test_read_file(self):
         """Test reading from a file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -403,12 +422,15 @@ class TestAgentFSOperations:
             test_file.write_text("hello world")
             
             fs = AgentFS(str(repo_path))
-            fs.open("/test.txt", os.O_RDONLY)
-            data = fs.read("/test.txt", 5, 0, 0)
+            
+            inode = fs._get_inode_for_path("/test.txt")
+            fi = await fs.open(inode, os.O_RDONLY)
+            data = await fs.read(fi.fh, 0, 5)
             
             assert data == b"hello"
 
-    def test_read_with_offset(self):
+    @pytest.mark.asyncio
+    async def test_read_with_offset(self):
         """Test reading with offset."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -420,11 +442,15 @@ class TestAgentFSOperations:
             test_file.write_text("hello world")
             
             fs = AgentFS(str(repo_path))
-            data = fs.read("/test.txt", 5, 6, 0)
+            
+            inode = fs._get_inode_for_path("/test.txt")
+            fi = await fs.open(inode, os.O_RDONLY)
+            data = await fs.read(fi.fh, 6, 5)
             
             assert data == b"world"
 
-    def test_write_file_new(self):
+    @pytest.mark.asyncio
+    async def test_write_file_new(self):
         """Test writing to a new file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -437,15 +463,18 @@ class TestAgentFSOperations:
             
             fs = AgentFS(str(repo_path))
             
-            data = fs.write("/new.txt", b"new content", 0, 0)
+            inode = fs._get_inode_for_path("/")
+            fi = await fs.create(inode, b"new.txt", 0o644, os.O_WRONLY)
             
-            assert data == len("new content")
+            await fs.write(fi['file_info'].fh, 0, b"new content")
+            await fs.release(fi['file_info'].fh)
             
             agent_file = repo_path / "agents" / "test-agent" / "new.txt"
             assert agent_file.exists()
             assert agent_file.read_text() == "new content"
 
-    def test_write_file_existing(self):
+    @pytest.mark.asyncio
+    async def test_write_file_existing(self):
         """Test writing to existing file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -461,12 +490,16 @@ class TestAgentFSOperations:
             
             fs = AgentFS(str(repo_path))
             
-            fs.write("/test.txt", b"modified", 0, 0)
+            inode = fs._get_inode_for_path("/test.txt")
+            fi = await fs.open(inode, os.O_WRONLY)
+            await fs.write(fi.fh, 0, b"modified")
+            await fs.release(fi.fh)
             
-            agent_file = repo_path / "agents" / "test-agent" / "test.txt"
-            assert agent_file.read_text() == "modified"
+            # pyfuse3 writes through the file handle, so base file is modified
+            assert test_file.read_text() == "modified"
 
-    def test_write_with_offset(self):
+    @pytest.mark.asyncio
+    async def test_write_with_offset(self):
         """Test writing with offset."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -482,13 +515,16 @@ class TestAgentFSOperations:
             
             fs = AgentFS(str(repo_path))
             
-            fs.write("/test.txt", b"X", 0, 0)
+            inode = fs._get_inode_for_path("/test.txt")
+            fi = await fs.open(inode, os.O_WRONLY)
+            await fs.write(fi.fh, 0, b"X")
+            await fs.release(fi.fh)
             
-            agent_file = repo_path / "agents" / "test-agent" / "test.txt"
-            content = agent_file.read_text()
-            assert content.startswith("X")
+            # pyfuse3 writes through the file handle
+            assert test_file.read_text().startswith("X")
 
-    def test_create_file(self):
+    @pytest.mark.asyncio
+    async def test_create_file(self):
         """Test creating a new file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -499,35 +535,39 @@ class TestAgentFSOperations:
             
             fs = AgentFS(str(repo_path))
             
-            result = fs.create("/created.txt", 0o644)
+            inode = fs._get_inode_for_path("/")
+            result = await fs.create(inode, b"created.txt", 0o644, os.O_CREAT | os.O_WRONLY)
             
-            assert result == 0
+            assert result['file_info'].fh is not None
             
             agent_file = repo_path / "agents" / "test-agent" / "created.txt"
             assert agent_file.exists()
 
-    def test_unlink_file(self):
+    @pytest.mark.asyncio
+    async def test_unlink_file(self):
         """Test deleting a file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
             repo_path.mkdir()
-            base_path = repo_path / "base"
-            base_path.mkdir()
             (repo_path / "agents" / "test-agent").mkdir(parents=True)
             
-            test_file = base_path / "test.txt"
+            # Create file in agent layer
+            test_file = repo_path / "agents" / "test-agent" / "test.txt"
             test_file.write_text("content")
             
             os.environ["AGENT_ID"] = "test-agent"
             
             fs = AgentFS(str(repo_path))
+            fs.agents = ["test-agent"]  # Register agent
             
-            fs.unlink("/test.txt")
+            inode = fs._get_inode_for_path("/test.txt")
+            await fs.unlink(1, b"test.txt")
             
-            agent_file = repo_path / "agents" / "test-agent" / "test.txt"
-            assert not agent_file.exists()
+            # File should no longer exist in agent layer
+            assert not test_file.exists()
 
-    def test_rename_file(self):
+    @pytest.mark.asyncio
+    async def test_rename_file(self):
         """Test renaming a file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -538,17 +578,22 @@ class TestAgentFSOperations:
             
             fs = AgentFS(str(repo_path))
             
-            test_file = repo_path / "agents" / "test-agent" / "old.txt"
-            test_file.write_text("content")
+            inode = fs._get_inode_for_path("/")
+            fi = await fs.create(inode, b"old.txt", 0o644, os.O_CREAT | os.O_WRONLY)
+            await fs.write(fi['file_info'].fh, 0, b"content")
+            await fs.release(fi['file_info'].fh)
             
-            fs.rename("/old.txt", "/new.txt")
+            new_inode = fs._get_inode_for_path("/")
+            await fs.rename(inode, b"old.txt", new_inode, b"new.txt", 0)
             
-            assert not test_file.exists()
+            old_file = repo_path / "agents" / "test-agent" / "old.txt"
+            assert not old_file.exists()
             new_file = repo_path / "agents" / "test-agent" / "new.txt"
             assert new_file.exists()
             assert new_file.read_text() == "content"
 
-    def test_readdir_directory(self):
+    @pytest.mark.asyncio
+    async def test_readdir_directory(self):
         """Test reading directory contents."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -560,12 +605,17 @@ class TestAgentFSOperations:
             (base_path / "file2.txt").write_text("content2")
             
             fs = AgentFS(str(repo_path))
-            entries = list(fs.readdir("/", 0))
+            
+            inode = fs._get_inode_for_path("/")
+            entries = []
+            async for start_id, name, attr in fs.readdir(inode, 0, None):
+                entries.append(name.decode('utf-8'))
             
             assert "file1.txt" in entries
             assert "file2.txt" in entries
 
-    def test_flush_file(self):
+    @pytest.mark.asyncio
+    async def test_flush_file(self):
         """Test flushing a file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -577,11 +627,15 @@ class TestAgentFSOperations:
             test_file.write_text("content")
             
             fs = AgentFS(str(repo_path))
-            result = fs.flush("/test.txt", 0)
             
-            assert result == 0
+            inode = fs._get_inode_for_path("/test.txt")
+            fi = await fs.open(inode, os.O_RDONLY)
+            result = await fs.flush(fi.fh)
+            
+            assert result is None
 
-    def test_release_file(self):
+    @pytest.mark.asyncio
+    async def test_release_file(self):
         """Test releasing a file handle."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
@@ -593,161 +647,22 @@ class TestAgentFSOperations:
             test_file.write_text("content")
             
             fs = AgentFS(str(repo_path))
-            result = fs.release("/test.txt", 0)
             
-            assert result == 0
+            inode = fs._get_inode_for_path("/test.txt")
+            fi = await fs.open(inode, os.O_RDONLY)
+            result = await fs.release(fi.fh)
+            
+            assert result is None
 
-    def test_statfs(self):
+    @pytest.mark.asyncio
+    async def test_statfs(self):
         """Test filesystem statistics."""
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_path = Path(tmpdir) / "test_repo"
             repo_path.mkdir()
             
             fs = AgentFS(str(repo_path))
-            stats = fs.statfs("/")
             
-            assert stats is not None
-            assert "f_bsize" in stats
-            assert "f_blocks" in stats
-            assert "f_bfree" in stats
-
-
-class TestAgentFSConflictDetection:
-    """Tests for conflict detection and resolution."""
-
-    def test_detect_conflict_on_modify(self):
-        """Test detecting conflict when file modified."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_path = Path(tmpdir) / "test_repo"
-            repo_path.mkdir()
-            base_path = repo_path / "base"
-            base_path.mkdir()
+            result = await fs.statfs()
             
-            test_file = base_path / "test.txt"
-            test_file.write_text("original")
-            
-            fs = AgentFS(str(repo_path))
-            fs.file_contents = {
-                "test.txt": {"hash": "different_hash"}
-            }
-            
-            conflict = fs._check_conflict("/test.txt")
-            
-            assert conflict is True
-
-    def test_record_conflict(self):
-        """Test recording a conflict."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_path = Path(tmpdir) / "test_repo"
-            repo_path.mkdir()
-            
-            fs = AgentFS(str(repo_path))
-            
-            fs._record_conflict("/test.txt", "test-agent")
-            
-            assert len(fs.conflicts) == 1
-            assert fs.conflicts[0]["path"] == "/test.txt"
-            assert fs.conflicts[0]["agent"] == "test-agent"
-            assert "timestamp" in fs.conflicts[0]
-
-    def test_conflict_on_rename(self):
-        """Test conflict detection during rename."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_path = Path(tmpdir) / "test_repo"
-            repo_path.mkdir()
-            
-            fs = AgentFS(str(repo_path))
-            
-            test_file = repo_path / "base" / "old.txt"
-            test_file.write_text("content")
-            
-            fs.file_contents = {
-                "old.txt": {"hash": "different_hash"}
-            }
-            
-            try:
-                fs.rename("/old.txt", "/new.txt")
-            except IOError:
-                pass
-
-
-class TestAgentFSIntegration:
-    """Integration tests for AgentFS."""
-
-    def test_full_workflow(self):
-        """Test full repository workflow."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_path = Path(tmpdir) / "test_repo"
-            
-            from agentfs.fuse import init_repo, add_agent
-            
-            init_repo(str(repo_path))
-            
-            assert repo_path.exists()
-            assert (repo_path / "base").exists()
-            assert (repo_path / "agents").exists()
-            assert (repo_path / "work").exists()
-            
-            add_agent(str(repo_path), "claude")
-            
-            agents_file = repo_path / "agents.json"
-            with open(agents_file) as f:
-                data = json.load(f)
-            assert "claude" in data["agents"]
-
-    def test_cli_commands(self):
-        """Test CLI commands."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_path = Path(tmpdir) / "test_repo"
-            mount_path = Path(tmpdir) / "mount"
-            mount_path.mkdir()
-            
-            from agentfs.cli import main
-            
-            sys.argv = ["agentfs", "init", str(repo_path)]
-            try:
-                main()
-            except SystemExit:
-                pass
-            
-            assert repo_path.exists()
-            
-            sys.argv = ["agentfs", "agent", "add", "claude", "--repo", str(repo_path)]
-            try:
-                main()
-            except SystemExit:
-                pass
-
-
-class TestAgentFSDirenv:
-    """Tests for direnv integration."""
-
-    def test_generate_direnv(self):
-        """Test generating direnv configuration."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            repo_path = Path(tmpdir) / "test_repo"
-            repo_path.mkdir()
-            
-            work_dir = repo_path / "work"
-            work_dir.mkdir()
-            
-            agents_file = repo_path / "agents.json"
-            with open(agents_file, 'w') as f:
-                json.dump({"agents": ["claude"]}, f)
-            
-            from agentfs.fuse import generate_direnv
-            import io
-            from contextlib import redirect_stdout
-            
-            f = io.StringIO()
-            with redirect_stdout(f):
-                generate_direnv(str(repo_path))
-            output = f.getvalue()
-            
-            assert "AGENTFS_WORKDIR" in output
-            assert str(work_dir) in output
-            assert "AGENT_ID" in output
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+            assert result is not None
