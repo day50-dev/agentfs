@@ -112,9 +112,41 @@ agentfs status ~/my-agent-repo
 - FUSE (Linux) or macFUSE (macOS)
 - `pyfuse3` package (requires FUSE development libraries)
 
-For Linux, install FUSE dev libraries:
+#### Recommended: Use conda-forge
+
+The easiest way to install is using conda-forge, which provides prebuilt FUSE libraries:
+
+```bash
+# Create a new conda environment
+conda create -n agentfs python=3.10
+conda activate agentfs
+
+# Install FUSE dependencies from conda-forge
+conda install -c conda-forge fuse3 pyfuse3
+
+# Install agentfs
+pip install -e .
+```
+
+#### Manual Installation
+
+If you don't use conda, you'll need to install FUSE development libraries manually:
+
+**Linux (Ubuntu/Debian):**
 ```bash
 sudo apt-get install libfuse3-dev python3-dev
+pip install pyfuse3
+```
+
+**macOS:**
+```bash
+brew install macfuse
+pip install pyfuse3
+```
+
+**Note:** On some systems, you may need to set `PKG_CONFIG_PATH` to help pyfuse3 find fuse3:
+```bash
+export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
 ```
 
 For macOS, install macFUSE:
@@ -129,7 +161,12 @@ brew install macfuse
 git clone https://github.com/yourusername/agentfs.git
 cd agentfs
 
-# Install dependencies (see Prerequisites for FUSE setup)
+# Install dependencies (check/install required FUSE libraries)
+./scripts/check-deps.sh    # Check if dependencies are satisfied
+# OR
+./scripts/install-deps.sh  # Install missing dependencies
+
+# Install agentfs
 pip install -e .
 
 # Verify installation
@@ -224,11 +261,23 @@ Note: The `direnv` command outputs the configuration content to stdout. You need
 
 AgentFS uses pytest for its test suite. The tests cover repository management, path resolution, file operations, and conflict detection.
 
+### Prerequisites
+
+Before running tests, ensure dependencies are installed:
+
+```bash
+# Check dependencies
+./scripts/check-deps.sh
+
+# Or install missing dependencies
+./scripts/install-deps.sh
+```
+
 ### Running Tests
 
 ```bash
 # Install dependencies first
-pip install -e . pytest pytest-cov
+pip install -e . pytest pytest-cov fuse
 
 # Run all tests
 pytest
@@ -240,10 +289,12 @@ pytest -v
 pytest --cov=agentfs --cov-report=html
 ```
 
-Note: pyfuse3 requires FUSE development libraries. On Ubuntu/Debian:
+**Note:** The test suite requires the `fuse` Python package (not pyfuse3). Install it with:
 ```bash
-sudo apt-get install libfuse3-dev python3-dev
+pip install fuse
 ```
+
+pyfuse3 is only required for FUSE filesystem operations (mounting).
 
 ### Test Structure
 
@@ -285,7 +336,8 @@ Install in development mode:
 pip install -e . pytest pytest-cov
 ```
 
-Note: pyfuse3 requires FUSE development libraries. On Ubuntu/Debian:
+Use the provided scripts to manage dependencies:
 ```bash
-sudo apt-get install libfuse3-dev python3-dev
+./scripts/check-deps.sh     # Verify dependencies
+./scripts/install-deps.sh   # Install missing dependencies
 ```
