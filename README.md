@@ -22,7 +22,7 @@ AgentFS uses an overlay filesystem approach where:
 Imagine two AI agents working on the same project:
 
 1. **Agent Claude** wants to refactor `utils.py`
-2. **Agent Siri** wants to add features to `utils.py`
+2. **Agent Cline** wants to add features to `utils.py`
 
 Without AgentFS:
 - Both agents start with the same version
