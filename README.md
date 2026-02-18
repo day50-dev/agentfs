@@ -1,8 +1,8 @@
-# AgentFS
+# StackedDiffFS
 
 **A horizontal, merge-safe filesystem for AI agents**
 
-AgentFS solves a common problem when using multiple AI agents with your codebase: how can multiple agents work on the same files without stepping on each other's changes? Instead of requiring agents to coordinate or merge changes manually, AgentFS provides each agent with their own view of your files while keeping the original intact.
+StackedDiffFS solves a common problem when using multiple AI agents with your codebase: how can multiple agents work on the same files without stepping on each other's changes? Instead of requiring agents to coordinate or merge changes manually, StackedDiffFS provides each agent with their own view of your files while keeping the original intact.
 
 ## Rationale
 
@@ -11,7 +11,7 @@ When multiple AI agents modify the same files:
 - **Loss of context** occurs when changes overwrite each other
 - **Reproducibility** is hard to maintain across agent runs
 
-AgentFS uses an overlay filesystem approach where:
+StackedDiffFS uses an overlay filesystem approach where:
 - The **base layer** contains your original files (read-only)
 - Each **agent layer** stores modifications specific to that agent
 - The **working layer** shows the merged view with agent changes taking precedence
@@ -24,13 +24,13 @@ Imagine two AI agents working on the same project:
 1. **Agent Claude** wants to refactor `utils.py`
 2. **Agent Cline** wants to add features to `utils.py`
 
-Without AgentFS:
+Without StackedDiffFS:
 - Both agents start with the same version
 - Claude refactors and saves
 - Siri adds features and saves
 - One set of changes is lost or they conflict
 
-With AgentFS:
+With StackedDiffFS:
 - Claude's changes go to `agents/claude/utils.py`
 - Siri's changes go to `agents/siri/utils.py`
 - Both can work independently
@@ -49,10 +49,10 @@ With AgentFS:
 
 ### 1. Initialize a Repository
 
-Create a new agentfs repository:
+Create a new StackedDiffFS repository:
 
 ```bash
-agentfs init ~/my-agent-repo
+StackedDiffFS init ~/my-agent-repo
 ```
 
 This creates the directory structure:
@@ -69,19 +69,19 @@ my-agent-repo/
 Add an agent to the repository:
 
 ```bash
-agentfs agent add claude --repo ~/my-agent-repo
+StackedDiffFS agent add claude --repo ~/my-agent-repo
 ```
 
 ### 3. Mount the Filesystem
 
-Mount the agentfs filesystem:
+Mount the StackedDiffFS filesystem:
 
 ```bash
 # Set the active agent
 export AGENT_ID=claude
 
 # Mount the filesystem
-agentfs mount ~/my-agent-repo ~/mount-point
+StackedDiffFS mount ~/my-agent-repo ~/mount-point
 ```
 
 ### 4. Working with Files
@@ -101,7 +101,7 @@ echo "modified" > ~/mount-point/basefile.txt
 Check repository status and conflicts:
 
 ```bash
-agentfs status ~/my-agent-repo
+StackedDiffFS status ~/my-agent-repo
 ```
 
 ## Installation
@@ -118,13 +118,13 @@ The easiest way to install is using conda-forge, which provides prebuilt FUSE li
 
 ```bash
 # Create a new conda environment
-conda create -n agentfs python=3.10
-conda activate agentfs
+conda create -n StackedDiffFS python=3.10
+conda activate StackedDiffFS
 
 # Install FUSE dependencies from conda-forge
 conda install -c conda-forge fuse3 pyfuse3
 
-# Install agentfs
+# Install StackedDiffFS
 pip install -e .
 ```
 
@@ -158,56 +158,56 @@ brew install macfuse
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/agentfs.git
-cd agentfs
+git clone https://github.com/yourusername/StackedDiffFS.git
+cd StackedDiffFS
 
 # Install dependencies (check/install required FUSE libraries)
 ./scripts/check-deps.sh    # Check if dependencies are satisfied
 # OR
 ./scripts/install-deps.sh  # Install missing dependencies
 
-# Install agentfs
+# Install StackedDiffFS
 pip install -e .
 
 # Verify installation
-agentfs --help
+StackedDiffFS --help
 ```
 
 ## CLI Commands
 
 ```bash
 # Initialize a repository
-agentfs init <path>                # Create new agentfs repository
+StackedDiffFS init <path>                # Create new StackedDiffFS repository
 
 # Mount/unmount filesystem
-agentfs mount <repo> <mount_point> # Mount filesystem at mount point
-agentfs unmount <mount_point>      # Unmount filesystem
+StackedDiffFS mount <repo> <mount_point> # Mount filesystem at mount point
+StackedDiffFS unmount <mount_point>      # Unmount filesystem
 
 # Agent management
-agentfs agent add <name>           # Add a new agent
-agentfs agent list                 # List all agents
-agentfs agent remove <name>        # Remove an agent
+StackedDiffFS agent add <name>           # Add a new agent
+StackedDiffFS agent list                 # List all agents
+StackedDiffFS agent remove <name>        # Remove an agent
 
 # Configuration
-agentfs status <repo>              # Show repository status
-agentfs conflicts <repo>           # Show conflicts
-agentfs direnv <repo>              # Generate direnv configuration
+StackedDiffFS status <repo>              # Show repository status
+StackedDiffFS conflicts <repo>           # Show conflicts
+StackedDiffFS direnv <repo>              # Generate direnv configuration
 ```
 
 For help with any command:
 ```bash
-agentfs <command> --help
+StackedDiffFS <command> --help
 ```
 
 ## Environment Variables
 
-AgentFS uses the following environment variables:
+StackedDiffFS uses the following environment variables:
 
 - `AGENT_ID` - Active agent identifier (must be set before mounting)
-- `AGENTFS_WORKDIR` - Directory containing working files (set by direnv)
-- `AGENTFS_BASE` - Path to base layer (set by direnv)
+- `StackedDiffFS_WORKDIR` - Directory containing working files (set by direnv)
+- `StackedDiffFS_BASE` - Path to base layer (set by direnv)
 
-When mounting AgentFS, ensure `AGENT_ID` is set to specify which agent's overlay to use.
+When mounting StackedDiffFS, ensure `AGENT_ID` is set to specify which agent's overlay to use.
 
 ## Directory Structure
 
@@ -230,7 +230,7 @@ When mounting AgentFS, ensure `AGENT_ID` is set to specify which agent's overlay
 
 ## Conflict Detection
 
-AgentFS automatically detects when files differ from the base:
+StackedDiffFS automatically detects when files differ from the base:
 
 ```json
 {
@@ -250,7 +250,7 @@ To automatically set up your environment when entering a repository:
 
 ```bash
 # Generate direnv configuration
-agentfs direnv ~/my-agent-repo > ~/my-agent-repo/.envrc
+StackedDiffFS direnv ~/my-agent-repo > ~/my-agent-repo/.envrc
 
 # direnv will automatically use this when you cd into the directory
 ```
@@ -259,7 +259,7 @@ Note: The `direnv` command outputs the configuration content to stdout. You need
 
 ## Testing
 
-AgentFS uses pytest for its test suite. The tests cover repository management, path resolution, file operations, and conflict detection.
+StackedDiffFS uses pytest for its test suite. The tests cover repository management, path resolution, file operations, and conflict detection.
 
 ### Prerequisites
 
@@ -286,7 +286,7 @@ pytest
 pytest -v
 
 # Run with coverage
-pytest --cov=agentfs --cov-report=html
+pytest --cov=StackedDiffFS --cov-report=html
 ```
 
 **Note:** Tests require pyfuse3 for FUSE operations. The test suite verifies agent management, conflict detection, and path resolution logic.
@@ -294,15 +294,15 @@ pytest --cov=agentfs --cov-report=html
 ### Test Structure
 
 - `tests/conftest.py` - Shared fixtures (e.g., `temp_repo`)
-- `tests/test_agentfs.py` - Unit and integration tests organized by functionality
+- `tests/test_StackedDiffFS.py` - Unit and integration tests organized by functionality
 
 ### Writing Tests
 
-When writing tests for AgentFS:
+When writing tests for StackedDiffFS:
 1. Use the `temp_repo` fixture to get a temporary repository structure
 2. Test agent isolation by creating files in different agent layers
 3. Verify conflict detection by checking hash comparisons
-4. Test FUSE operations through the `AgentFS` class directly
+4. Test FUSE operations through the `StackedDiffFS` class directly
 
 ## License
 
