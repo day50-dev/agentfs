@@ -103,7 +103,7 @@ export AGENT_ID=claude
 ```
 
 * Users run `direnv allow` to activate.
-* Any process in the shell sees `$AGENTFS_WORKDIR` as the workspace.
+* Any process in the shell sees `$STACKEDFS_WORKDIR` as the workspace.
 
 ---
 
