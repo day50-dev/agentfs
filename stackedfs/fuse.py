@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AgentFS FUSE Implementation using pyfuse3."""
+"""StackedDiffFS (StackedFS) FUSE Implementation using pyfuse3."""
 
 import os
 import sys
@@ -15,11 +15,11 @@ from pyfuse3 import init as pyfuse3_init, main as pyfuse3_main, close as pyfuse3
 import trio
 
 
-class AgentFS(Operations):
-    """AgentFS - A FUSE-based overlay filesystem for AI agents using pyfuse3."""
+class StackedFS(Operations):
+    """StackedDiffFS (StackedFS) - A FUSE-based overlay filesystem for AI agents using pyfuse3."""
 
     def __init__(self, repo_path):
-        """Initialize AgentFS with repository path."""
+        """Initialize StackedFS with repository path."""
         self.repo_path = Path(repo_path)
         self.base_path = self.repo_path / "base"
         self.agents_dir = self.repo_path / "agents"
@@ -605,8 +605,8 @@ class AgentFS(Operations):
 
 
 def mount(repo_path, mount_path, foreground=False, debug=False):
-    """Mount the AgentFS filesystem."""
-    fs = AgentFS(repo_path)
+    """Mount the StackedFS filesystem."""
+    fs = StackedFS(repo_path)
     pyfuse3_init(fs, mount_path, pyfuse3.default_options)
     try:
         if foreground:
@@ -618,20 +618,20 @@ def mount(repo_path, mount_path, foreground=False, debug=False):
 
 
 def unmount(mount_path):
-    """Unmount the AgentFS filesystem."""
+    """Unmount the StackedFS filesystem."""
     import subprocess
     subprocess.run(['fusermount', '-u', mount_path], check=True)
 
 
 def init_repo(repo_path):
-    """Initialize a new AgentFS repository."""
+    """Initialize a new StackedFS repository."""
     repo = Path(repo_path)
     repo.mkdir(parents=True, exist_ok=True)
     (repo / "base").mkdir(exist_ok=True)
     (repo / "agents").mkdir(exist_ok=True)
     (repo / "work").mkdir(exist_ok=True)
     (repo / "agents.json").write_text(json.dumps({'agents': []}, indent=2))
-    print(f"Initialized AgentFS repository at {repo_path}")
+    print(f"Initialized StackedFS repository at {repo_path}")
 
 
 def add_agent(repo_path, agent_name):
@@ -703,6 +703,6 @@ def generate_direnv(repo_path, agent_name=None):
     work_dir = repo / "work"
     
     print("Generated .envrc content:")
-    print(f"export AGENTFS_WORKDIR={work_dir}")
+    print(f"export STACKEDFS_WORKDIR={work_dir}")
     if agent_name:
         print(f"export AGENT_ID={agent_name}")

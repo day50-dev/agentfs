@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for AgentFS - pyfuse3 implementation."""
+"""Tests for StackedDiffFS (StackedFS) - pyfuse3 implementation."""
 
 import asyncio
 import os
@@ -10,11 +10,11 @@ import stat
 from pathlib import Path
 import pytest
 import trio
-from agentfs.fuse import AgentFS, ROOT_INODE
-from pyfuse3 import FUSEError
+from stackedfs.fuse import StackedFS
+from pyfuse3 import FUSEError, ROOT_INODE
 
 
-class TestAgentFSRepository:
+class TestStackedFSRepository:
     """Tests for repository initialization and management."""
 
     def test_init_creates_structure(self):
@@ -40,7 +40,7 @@ class TestAgentFSRepository:
             repo_path = Path(tmpdir) / "test_repo"
             repo_path.mkdir()
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             agents = fs.agents
             assert agents == []
 
@@ -50,7 +50,7 @@ class TestAgentFSRepository:
             repo_path = Path(tmpdir) / "test_repo"
             repo_path.mkdir()
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             fs.agents = ["agent1", "agent2"]
             fs._save_agents()
             
@@ -68,7 +68,7 @@ class TestAgentFSRepository:
             repo_path = Path(tmpdir) / "test_repo"
             repo_path.mkdir()
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             fs.agents = ["claude"]
             fs._save_agents()
             
@@ -87,12 +87,12 @@ class TestAgentFSRepository:
             with open(agents_file, 'w') as f:
                 json.dump({"agents": ["claude"]}, f)
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             agents = fs.agents
             assert agents == ["claude"]
 
 
-class TestAgentFSResolving:
+class TestStackedFSResolving:
     """Tests for path resolution in overlay filesystem."""
 
     def test_resolve_empty(self):
@@ -103,7 +103,7 @@ class TestAgentFSResolving:
             base_path = repo_path / "base"
             base_path.mkdir()
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             path, agent = fs._get_resolved_path("/nonexistent")
             assert path is None
@@ -120,7 +120,7 @@ class TestAgentFSResolving:
             test_file = base_path / "test.txt"
             test_file.write_text("base content")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             path, agent = fs._get_resolved_path("/test.txt")
             assert path == test_file
@@ -143,7 +143,7 @@ class TestAgentFSResolving:
             agent_file = agent_path / "test.txt"
             agent_file.write_text("agent content")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             fs.agents = ["claude"]
             
             path, agent = fs._get_resolved_path("/test.txt")
@@ -172,7 +172,7 @@ class TestAgentFSResolving:
             agent2_file = repo_path / "agents" / "agent2" / "test.txt"
             agent2_file.write_text("agent2")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             fs.agents = ["agent1", "agent2"]
             
             path, agent = fs._get_resolved_path("/test.txt")
@@ -190,7 +190,7 @@ class TestAgentFSResolving:
             (base_path / "file1.txt").write_text("content1")
             (base_path / "file2.txt").write_text("content2")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             entries = list(fs._get_all_entries("/"))
             assert "file1.txt" in entries
@@ -211,7 +211,7 @@ class TestAgentFSResolving:
             agent_path.mkdir()
             (agent_path / "agent_file.txt").write_text("agent")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             fs.agents = ["claude"]
             
             entries = list(fs._get_all_entries("/"))
@@ -219,7 +219,7 @@ class TestAgentFSResolving:
             assert "agent_file.txt" in entries
 
 
-class TestAgentFSHashing:
+class TestStackedFSHashing:
     """Tests for file hashing and conflict detection."""
 
     def test_compute_hash_file(self):
@@ -228,7 +228,7 @@ class TestAgentFSHashing:
             test_file = Path(tmpdir) / "test.txt"
             test_file.write_text("test content")
             
-            fs = AgentFS(str(Path(tmpdir).parent))
+            fs = StackedFS(str(Path(tmpdir).parent))
             hash1 = fs._compute_hash(test_file)
             hash2 = fs._compute_hash(test_file)
             
@@ -237,7 +237,7 @@ class TestAgentFSHashing:
 
     def test_compute_hash_missing(self):
         """Test computing hash of non-existent file."""
-        fs = AgentFS(str(Path(tempfile.mkdtemp())))
+        fs = StackedFS(str(Path(tempfile.mkdtemp())))
         hash_val = fs._compute_hash(Path("/nonexistent"))
         assert hash_val is None
 
@@ -252,7 +252,7 @@ class TestAgentFSHashing:
             test_file = base_path / "test.txt"
             test_file.write_text("original")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             conflict = fs._check_conflict("/test.txt")
             assert conflict is False
@@ -268,7 +268,7 @@ class TestAgentFSHashing:
             test_file = base_path / "test.txt"
             test_file.write_text("original")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             fs.file_contents = {
                 "test.txt": {"hash": "different_hash"}
             }
@@ -277,7 +277,7 @@ class TestAgentFSHashing:
             assert conflict is True
 
 
-class TestAgentFSOperations:
+class TestStackedFSOperations:
     """Tests for FUSE operations."""
 
     @pytest.mark.asyncio
@@ -292,7 +292,7 @@ class TestAgentFSOperations:
             test_file = base_path / "test.txt"
             test_file.write_text("content")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             # Get inode for test file
             inode = fs._get_inode_for_path("/test.txt")
@@ -308,7 +308,7 @@ class TestAgentFSOperations:
             repo_path = Path(tmpdir) / "test_repo"
             repo_path.mkdir()
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             with pytest.raises(FUSEError):
                 await fs.getattr(999)
@@ -329,7 +329,7 @@ class TestAgentFSOperations:
             test_link = base_path / "link"
             test_link.symlink_to("target.txt")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             inode = fs._get_inode_for_path("/link")
             link_target = await fs.readlink(inode)
@@ -348,7 +348,7 @@ class TestAgentFSOperations:
             test_file = base_path / "file.txt"
             test_file.write_text("content")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             inode = fs._get_inode_for_path("/file.txt")
             
@@ -367,7 +367,7 @@ class TestAgentFSOperations:
             test_file = base_path / "test.txt"
             test_file.write_text("content")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             parent_inode = ROOT_INODE
             result = await fs.lookup(parent_inode, b"test.txt")
@@ -383,7 +383,7 @@ class TestAgentFSOperations:
             repo_path = Path(tmpdir) / "test_repo"
             repo_path.mkdir()
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             parent_inode = ROOT_INODE
             
@@ -402,7 +402,7 @@ class TestAgentFSOperations:
             test_file = base_path / "test.txt"
             test_file.write_text("content")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             inode = fs._get_inode_for_path("/test.txt")
             fi = await fs.open(inode, os.O_RDONLY)
@@ -421,7 +421,7 @@ class TestAgentFSOperations:
             test_file = base_path / "test.txt"
             test_file.write_text("hello world")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             inode = fs._get_inode_for_path("/test.txt")
             fi = await fs.open(inode, os.O_RDONLY)
@@ -441,7 +441,7 @@ class TestAgentFSOperations:
             test_file = base_path / "test.txt"
             test_file.write_text("hello world")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             inode = fs._get_inode_for_path("/test.txt")
             fi = await fs.open(inode, os.O_RDONLY)
@@ -461,7 +461,7 @@ class TestAgentFSOperations:
             
             os.environ["AGENT_ID"] = "test-agent"
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             inode = fs._get_inode_for_path("/")
             fi = await fs.create(inode, b"new.txt", 0o644, os.O_WRONLY)
@@ -488,7 +488,7 @@ class TestAgentFSOperations:
             
             os.environ["AGENT_ID"] = "test-agent"
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             inode = fs._get_inode_for_path("/test.txt")
             fi = await fs.open(inode, os.O_WRONLY)
@@ -513,7 +513,7 @@ class TestAgentFSOperations:
             
             os.environ["AGENT_ID"] = "test-agent"
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             inode = fs._get_inode_for_path("/test.txt")
             fi = await fs.open(inode, os.O_WRONLY)
@@ -533,7 +533,7 @@ class TestAgentFSOperations:
             
             os.environ["AGENT_ID"] = "test-agent"
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             inode = fs._get_inode_for_path("/")
             result = await fs.create(inode, b"created.txt", 0o644, os.O_CREAT | os.O_WRONLY)
@@ -557,7 +557,7 @@ class TestAgentFSOperations:
             
             os.environ["AGENT_ID"] = "test-agent"
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             fs.agents = ["test-agent"]  # Register agent
             
             inode = fs._get_inode_for_path("/test.txt")
@@ -576,7 +576,7 @@ class TestAgentFSOperations:
             
             os.environ["AGENT_ID"] = "test-agent"
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             inode = fs._get_inode_for_path("/")
             fi = await fs.create(inode, b"old.txt", 0o644, os.O_CREAT | os.O_WRONLY)
@@ -604,7 +604,7 @@ class TestAgentFSOperations:
             (base_path / "file1.txt").write_text("content1")
             (base_path / "file2.txt").write_text("content2")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             inode = fs._get_inode_for_path("/")
             entries = []
@@ -626,7 +626,7 @@ class TestAgentFSOperations:
             test_file = base_path / "test.txt"
             test_file.write_text("content")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             inode = fs._get_inode_for_path("/test.txt")
             fi = await fs.open(inode, os.O_RDONLY)
@@ -646,7 +646,7 @@ class TestAgentFSOperations:
             test_file = base_path / "test.txt"
             test_file.write_text("content")
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             inode = fs._get_inode_for_path("/test.txt")
             fi = await fs.open(inode, os.O_RDONLY)
@@ -661,7 +661,7 @@ class TestAgentFSOperations:
             repo_path = Path(tmpdir) / "test_repo"
             repo_path.mkdir()
             
-            fs = AgentFS(str(repo_path))
+            fs = StackedFS(str(repo_path))
             
             result = await fs.statfs()
             

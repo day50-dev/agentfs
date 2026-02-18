@@ -1,10 +1,10 @@
 #!/bin/bash
-# Install AgentFS dependencies
+# Install StackedFS dependencies
 # This script checks for and installs required FUSE dependencies
 
 set -e
 
-echo "Checking AgentFS dependencies..."
+echo "Checking StackedFS dependencies..."
 
 # Check if we're on Linux or macOS
 case "$(uname -s)" in

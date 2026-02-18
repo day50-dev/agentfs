@@ -1,4 +1,4 @@
-"""Pytest configuration for AgentFS tests."""
+"""Pytest configuration for StackedDiffFS (StackedFS) tests."""
 
 import pytest
 import trio

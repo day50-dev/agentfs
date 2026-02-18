@@ -1,16 +1,16 @@
 #!/bin/bash
-# Check AgentFS dependencies
+# Check StackedFS dependencies
 # This script verifies that all required dependencies are installed
 
 set -e
 
-echo "Checking AgentFS dependencies..."
+echo "Checking StackedFS dependencies..."
 
 # Check Python version
 PYTHON_VERSION=$(python3 --version 2>&1 | cut -d' ' -f2)
 echo "Python version: $PYTHON_VERSION"
 if [[ ! "$PYTHON_VERSION" =~ ^3\.[8-9] ]] && [[ ! "$PYTHON_VERSION" =~ ^3\.1[0-9] ]]; then
-    echo "⚠ Warning: AgentFS requires Python 3.8+"
+    echo "⚠ Warning: StackedFS requires Python 3.8+"
 fi
 
 # Check if FUSE is available

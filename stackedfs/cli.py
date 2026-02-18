@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AgentFS Command-Line Interface."""
+"""StackedDiffFS (StackedFS) Command-Line Interface."""
 
 import sys
 import argparse
@@ -13,25 +13,25 @@ from .fuse import (
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        prog='agentfs',
-        description='AgentFS - A horizontal, merge-safe filesystem for AI agents'
+        prog='stackedfs',
+        description='StackedDiffFS (StackedFS) - A horizontal, merge-safe filesystem for AI agents'
     )
     
     subparsers = parser.add_subparsers(dest='command', help='Command to run')
     
     # init command
-    init_parser = subparsers.add_parser('init', help='Initialize a new AgentFS repository')
+    init_parser = subparsers.add_parser('init', help='Initialize a new StackedFS repository')
     init_parser.add_argument('path', help='Path to repository directory')
     
     # mount command
-    mount_parser = subparsers.add_parser('mount', help='Mount the AgentFS filesystem')
+    mount_parser = subparsers.add_parser('mount', help='Mount the StackedFS filesystem')
     mount_parser.add_argument('repo', help='Path to repository')
     mount_parser.add_argument('mount_point', help='Mount point')
     mount_parser.add_argument('--foreground', '-f', action='store_true', help='Run in foreground')
     mount_parser.add_argument('--debug', '-d', action='store_true', help='Enable debug output')
     
     # unmount command
-    unmount_parser = subparsers.add_parser('unmount', help='Unmount the AgentFS filesystem')
+    unmount_parser = subparsers.add_parser('unmount', help='Unmount the StackedFS filesystem')
     unmount_parser.add_argument('mount_point', help='Mount point')
     
     # agent add command

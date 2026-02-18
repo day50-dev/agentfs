@@ -207,8 +207,6 @@ StackedFS uses the following environment variables:
 - `STACKEDFS_WORKDIR` - Directory containing working files (set by direnv)
 - `STACKEDFS_BASE` - Path to base layer (set by direnv)
 
-When mounting StackedFS, ensure `AGENT_ID` is set to specify which agent's overlay to use.
-
 ## Directory Structure
 
 ```
